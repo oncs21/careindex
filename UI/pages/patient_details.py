@@ -1,15 +1,5 @@
 import streamlit as st
-
-def get_patient_details(patient_id):
-    return [
-        {
-            'id': 1,
-            'f_name': 'John',
-            'l_name': 'Doe',
-            'age': 27,
-            'profile_img': 'https://capecoraltech.edu/wp-content/uploads/2016/01/tutor-8-3.jpg'
-        },
-    ]
+from services.patients import get_patient
 
 patient_id = st.session_state.get("patient_id", None)
 
@@ -23,5 +13,11 @@ except ValueError:
     st.error(f"Patient ID must be an integer, currently it is {patient_id}")
     st.stop()
 
-patient = get_patient_details(patient_id)
-st.title(f"{patient[0]['f_name']} {patient[0]['l_name']}")
+patient = get_patient(patient_id)[0]
+st.title(f"{patient['first_name']} {patient['last_name']}")
+
+st.write(f"DOB = {patient["date_of_birth"]}")
+
+st.write("# Timeline")
+st.write("# Documents")
+st.write("# Summary")

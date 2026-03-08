@@ -1,25 +1,14 @@
 from fastapi import FastAPI
-from app.api.routes.documents.doucments import router as docs_router
+from app.api.router import router
 
 from contextlib import asynccontextmanager
 from app.api.dependencies.store import doc_store
 
+from app.core.supabase_client import init_client
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await doc_store.put(
-        key="sample.txt",
-        name="sample.txt",
-        content_type="text/plain",
-        data=b"Hello! This is a test doc."
-    )
-
-    await doc_store.put(
-        key="sample2.txt",
-        name="sample2.txt",
-        content_type="text/plain",
-        data=b"Hello! This is another test doc."
-    )
+    app.state.client = await init_client()
 
     yield
 
@@ -30,7 +19,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.include_router(docs_router, prefix="/api/v1")
+app.include_router(router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Default"])
