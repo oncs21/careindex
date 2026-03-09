@@ -1,5 +1,5 @@
 from fastapi import APIRouter, status, Depends, HTTPException
-from app.api.dependencies.db import get_client
+from app.dependencies.db import get_client
 from supabase import AsyncClient
 
 router = APIRouter(tags=["Patient"])

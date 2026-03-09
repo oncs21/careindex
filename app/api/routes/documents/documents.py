@@ -1,28 +1,52 @@
 from fastapi import APIRouter, status, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
-from app.storage.temp.inmemory import InMemoryDocumentStore
-from app.api.dependencies.store import get_doc_store
-from starlette.responses import FileResponse
-from typing import List, Dict
+
+from app.repositories.documents.documents_repo import DocumentRepository
+from app.services.storage_service import SupabaseStorageService
+from app.dependencies.storage import get_storage_service
+from app.dependencies.db import get_client
+from app.dependencies.repositories import get_doc_repository
+
+from supabase import AsyncClient
+
+from starlette.responses import StreamingResponse
+from starlette.background import BackgroundTask
+from typing import List, Dict, Any
+
+import httpx
 
 router = APIRouter(tags=["Document"])
 
 @router.get(
-    "/doc/{doc_name}",
+    "/doc/{doc_id}",
     status_code=status.HTTP_200_OK,
-    name="get_document"
+    name="get_original_document"
 )
 async def get_document(
-    doc_name: str,
-    repository: InMemoryDocumentStore = Depends(get_doc_store)
+    doc_id: int,
+    db_client: AsyncClient = Depends(get_client),
+    repository: DocumentRepository = Depends(get_doc_repository),
+    storage_service: SupabaseStorageService = Depends(get_storage_service)
 ):
-    if not doc_name:
-        raise HTTPException(status_code=400, detail="Invalid document name")
+    data = await repository.get_document_by_id(doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Document does not exist")
     
-    try:
-        return await repository.preview_response(doc_name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Document not found")  
+    doc = data
+    doc_url = await storage_service.get_document_url("patients", doc["storage_path"])
+
+    if not doc_url or doc_url == "":
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async with httpx.AsyncClient() as client:
+        request = client.build_request("GET", doc_url)
+        response = await client.send(request, stream=True)
+
+        return StreamingResponse(
+            response.aiter_bytes(),
+            media_type=response.headers.get("content-type", "application/octet-stream"),
+            background=BackgroundTask(response.aclose)
+        )
     
 
 @router.post(
@@ -31,74 +55,90 @@ async def get_document(
     name="upload_documents"
 )
 async def upload_documents(
+    patient_id: int,
+    payloads: List[Dict[str, Any]],
     files: List[UploadFile] = File(...),
-    repository: InMemoryDocumentStore = Depends(get_doc_store)
+    repository: DocumentRepository = Depends(get_doc_repository),
+    storage_service: SupabaseStorageService = Depends(get_storage_service)
 ):
-    if not len(files):
+    if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
     
-    res: Dict[str, any] = {}
+    if len(payloads) != len(files):
+        raise HTTPException(status_code=400, detail="Number of payloads must match the number of files")
+    
+    results = []
 
-    for file in files:
-        content_type = file.content_type or "application/octet-stream"
-        data = await file.read()
-
+    for idx, file in enumerate(files):
         try:
-            stored = await repository.put(
-                key=file.filename,
-                name=file.filename,
-                content_type=content_type,
-                data=data
+            content_type = file.content_type or "application/octet-stream"
+            data = await file.read()
+
+            if not data:
+                results.append({
+                    "filename": file.filename,
+                    "status": "failed",
+                    "error": "Empty file"
+                })
+                continue
+
+            doc_type = payloads[idx]["doc_type"]
+
+            ext_idx = file.filename.rfind('.')
+            file_ext = ""
+            if ext_idx != -1:
+                file_ext = file.filename[ext_idx+1:]
+
+            uploaded = await repository.upload_document(
+                patient_id=patient_id,
+                doc_title=file.filename,
+                doc_type=doc_type,
+                mime_type=file.content_type,
+                file_ext=file_ext
             )
-    
+
+            if uploaded is None:
+                results.append({
+                    "filename": file.filename,
+                    "status": "failed",
+                    "error": "Could not create document record"
+                })
+                continue
+
+            doc_id = uploaded["id"]
+
+            storage_path = f"{patient_id}/documents/{uploaded['id']/{file.filename}}"
+
+            await storage_service.upload_file(
+                bucket_name="patients",
+                file_bytes=data,
+                content_type=file.content_type,
+                storage_path=storage_path
+            )
+
+            updated_doc = await repository.update_document_storage(
+                doc_id=doc_id,
+                storage_path=storage_path,
+                bucket_name="patients"
+            )
+
+            results.append({
+                "document_id": doc_id,
+                "filename": file.filename,
+                "status": "uploaded",
+                "document": updated_doc
+            })
+        
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to store {file.filename}") from e
-
-        res[file.filename] = {
-            **stored,
-            "content_type": content_type,
-            "original_name": file.filename
-        }
-
-    return res
+            results.append({
+                "filename": file.filename,
+                "status": "failed",
+                "error": str(e)
+            })
 
 
-@router.delete(
-    "/{doc_name}"
-)
-async def delete_document(
-    doc_name: str,
-    repository: InMemoryDocumentStore = Depends(get_doc_store)
-):
-    if not doc_name:
-        raise HTTPException(status_code=400, detail="Invalid document name")
-    
-    return await repository.delete(doc_name)
-
-
-@router.get(
-    "/doc/{doc_name}/download",
-    status_code=status.HTTP_200_OK,
-    name="download_document"
-)
-async def download_document(
-    doc_name: str,
-    repository: InMemoryDocumentStore = Depends(get_doc_store)
-):
-    if not doc_name:
-        raise HTTPException(status_code=400, detail="Invalid document name")
-    
-    doc_details = {}
-    
-    try:
-        doc_details = await repository.get(doc_name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    return Response(
-        content=doc_details["bytes"],
-        media_type=doc_details["content_type"],
-        headers={
-            "Content-Disposition": f'attachment; filename="{doc_details["name"]}"'
-        }
-    )
+    return {
+        "patient_id": patient_id,
+        "count": len(results),
+        "results": results
+    }

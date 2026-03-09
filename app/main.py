@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from app.api.router import router
 
 from contextlib import asynccontextmanager
-from app.api.dependencies.store import doc_store
 
 from app.core.supabase_client import init_client
 
